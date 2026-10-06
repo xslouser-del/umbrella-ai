@@ -1,15 +1,76 @@
-# Umbrella Academy AI Simulation — Render build
+# Umbrella · Не тот час
 
-Это серверная версия. Никаких глав/сцен/готовых диалогов нет.
+Интерактивная фанатская история по мотивам The Umbrella Academy в существующем Node.js + Express проекте. Переписка — форма показа **физической сцены**, а не телефонный чат. Игрок управляет Алиной свободным текстом: речь, действия и решения в одном поле ввода. Настоящие сообщения телефона — отдельные события.
 
-## Render
-Build Command: `npm install`
-Start Command: `npm start`
+## Запуск
 
-Environment variables:
-- `OPENAI_API_KEY` — ваш API key (никогда не кладите его в GitHub)
-- `OPENAI_MODEL` — необязательно, по умолчанию `gpt-5-mini`
+Node 20.12+. `npm ci`, `npm start`. На Render: Build `npm ci`, Start `npm start`, порт `process.env.PORT`.
 
-После деплоя откройте `/api/health`: `{"ok":true,"ai":true}` означает, что AI подключён.
+Серверные переменные: `OPENROUTER_API_KEY`; необязательная `OPENROUTER_MODEL` (fallback `openrouter/free`); необязательный стабильный `SAVE_SECRET` для сохранений. Ключи не находятся во frontend, Git и логах. В отсутствие `SAVE_SECRET` ключ шифрования выводится из API-ключа; его смена делает прежние snapshots несовместимыми. Если оба отсутствуют, сохранения живут до перезапуска процесса.
 
-Важно: текущая память хранится в памяти процесса Render. Для долговременной production-памяти нужен Redis/Postgres.
+`.env.example` — образец. Сервер автоматически читает локальный `.env` при `npm start`; заданные переменные хостинга имеют приоритет. Локальный ключ OpenRouter нужен отдельно от ключа на Render. Не отправляйте ключ в чат или Git. `/api/health` подтверждает конфигурацию, **не** успех генерации.
+
+## Сцена и архитектура
+
+- `world.json` — скрытая истина, правила, граф помещений, начальные локации и предметы. `agents.json` — существующие личности и исходные знания NPC.
+- `lib/world-state.js` — физический state, лента событий с зафиксированными свидетелями, public projection и миграция старого сохранения. Начало: гостиная, 23:47, Алина + Five + Klaus; Diego в подвале, Luther на кухне, Allison во дворе, Viktor в спальне, Lila в архиве. Время — внутримировое, не системные часы пользователя.
+- `lib/physical-actions.js` — явные действия из пользовательского ввода и разрешённые операции NPC. Проверяет смежность комнат, доступность предмета, владение, открытое окно. Удалённая цель игрока приводит к пути через связанные комнаты; NPC не телепортируется произвольным state update.
+- `lib/story-engine.js` — серверный режиссёр: сюжетные узлы, prerequisites, интервал минимум три пользовательских хода между открытиями, аномалии, offscreen перемещения и настоящие сообщения телефона. Тайна происхождения раскрывается только после нескольких улик, угрозы и нового физического осмотра документа. Движок не решает действия, мысли или эмоции игрока.
+- `lib/character-agents.js` — максимум два отдельных NPC-вызова за ход. Каждый получает только свою карточку, память, отношения, своё помещение, доступные предметы и события, свидетелем которых был. Второй NPC видит первую реплику, если действительно её слышал; они могут спорить между собой и молчать. В тиках может действовать один удалённый NPC со своим контекстом.
+- `lib/validator.js` — strict JSON `events`, whitelist actor/type/op, ограничения текста/памяти/дельт отношений. `environment`/`anomaly` от LLM отвергаются. Действия AI не содержат свободного описательного текста: текст составляет физический движок из разрешённой операции. Поэтому AI не может спрятать «Алина испугалась и отступила» в narrator или в ремарке Five.
+- `server.js` — HTTP source of player input, сериализация ходов, идемпотентность, rate limit, AI generation и безопасные ошибки. OpenRouter baseURL `https://openrouter.ai/api/v1`; timeout 20 секунд на вызов, одна повторная попытка при повреждённом JSON. Ошибка провайдера оставляет принятый ход и физическое состояние, возвращая `aiStatus:unavailable`.
+- `lib/save.js` — зашифрованные AES-256-GCM snapshots с проверкой подлинности и sessionId.
+- `public/` — одна непрерывная история: dialogue / action / environment / anomaly / phone. Отдельных личных чатов нет. Панель сцены показывает только присутствующих, доступные предметы, инвентарь и выходы. Действия вводятся текстом, без вариантов ответа.
+
+`lib/simulation.js` остаётся небольшим barrel export, а не монолитным движком.
+
+## Свободный ввод и физическая истина
+
+Например: `Беру фотографию. Прячу её за спину.` — предмет становится владением Алины и скрыт от осмотра NPC. `Отдаю фотографию Пятому.` передаёт её только присутствующему Five. `Иду в спальню. Кладу фотографию на стол. Ухожу.` оставляет предмет именно в спальне. `Открываю окно и вылезаю наружу.` работает только при наличии окна и его открытии.
+
+Пользовательский текст сохраняется буквально один раз (`player_input`). Для NPC он разбирается по частям в порядке действия/речи: люди в прежней комнате видят уход, люди в новой слышат следующую фразу. Не нужно `/say` или `/action`. Команды NPC, отрицания, условные фразы и прошедшее время не двигают Алину.
+
+Поддерживаемые физические операции ограничены графом и важными предметами: перемещение, осмотр, взять/положить/передать/спрятать, открыть/закрыть окно и простые жесты. Сложные действия вроде боя, разрушения предметов или необычного использования силы пока передаются агентам как **попытки**, не получают выдуманный успешный результат и не создают произвольный state. Это не универсальный физический симулятор. Любой текст может получить реакцию персонажа; художественная точность интерпретации бесплатной LLM требует live-проверки.
+
+Защита Алины структурная: ни одна NPC-generation не может создать actor вне своего NPC, менять Alina location/inventory или добавлять environment narration. Дополнительный guard в `appendEvent` запрещает `Alina` из любого source кроме `player`, остальные неизвестные aliases отвергает. Сформированные сервером ремарки Алины возникают только из распознанного явного пользовательского действия; клиент отображает сам исходный ввод. Свободную речь NPC нельзя гарантировать от всех смысловых галлюцинаций; тип события dialogue является утверждением NPC, а не авторитетным изменением мира. Фильтр отбрасывает узнаваемые варианты скрытого авторства/присвоения реакции игрока.
+
+## Знания и предметы
+
+Свидетели фиксируются **во время события**, а не вычисляются из текущего состава сцены. Пришедший позже не получает старую беседу. Ушедший не слышит следующие слова. Телефон имеет явных получателей; остальные присутствующие не получают его содержимое автоматически. Читатель документа узнаёт содержимое индивидуально. Шёпот явно присутствующему адресату слышит только адресат; остальные видят факт тихого разговора. Он может сообщить содержимое другим обычной речью; тогда они услышат пересказ, а не оригинальное приватное событие.
+
+AI не получает `WORLD.truth`, общий внутренний state, чужую память или отсутствующего игрока. Нет произвольного `state_changes`. Каждый предмет имеет место либо владельца. Модель не может взять/рассмотреть вещь у Алины без её передачи/возврата в помещение, создать предмет, заставить Алину принять вещь или переписать её реакцию.
+
+## API и сохранения
+
+POST JSON; `sessionId` и `requestId` — UUID. Ответ: `schemaVersion:3`, `sessionId`, `events` (только доступные игроку), `scene`, `inventory`, `nearbyObjects`, `exits`, зашифрованный `save`, `aiStatus`.
+
+- `/api/start`: `{sessionId,save?}` — идемпотентное начало/восстановление. Начальная сцена серверная, без вызова AI.
+- `/api/message`: `{sessionId,save?,requestId,text}` — речь/действие Алины, до 3000 символов. Endpoint сохранён для совместимости маршрутов, семантика теперь сценическая. Старые `channel:Five/group` отвергаются, `channel:scene` допустим, поле не нужно.
+- `/api/tick`: `{sessionId,save?}` — независимые события при открытом клиенте, не чаще 30 секунд.
+- `/api/health`: конфигурация без секретов.
+
+HTTP 400: плохой запрос; 403: cross-site POST; 409: ход занят; 410: сессия отсутствует без snapshot; 422: snapshot не прошёл проверку; 429: менее 1.5 секунд между пользовательскими ходами.
+
+localStorage сохраняет snapshot, историю, очередь, черновик и показанные события. Экспорт/импорт доступен через настройки. Повтор с тем же requestId не создаёт второй ход. Аутентифицированные сохранения предыдущей messenger-версии мигрируют в архив настоящих телефонных сообщений с прежними приватными свидетелями; личные чаты не превращаются в публичную историю комнаты. Старый localStorage оставлен как резерв. Прежняя исходная версия на Render не имела проверяемых snapshots; утраченную после её рестарта Map-историю восстановить невозможно.
+
+## Бесплатный режим и iPhone
+
+[Render Free](https://render.com/docs/free) засыпает после 15 минут без запросов и имеет непостоянную файловую систему. Поэтому постоянная БД/платные сервисы не подключены: после рестарта сервер восстанавливается из проверяемого клиентского snapshot. Пока сессия есть, серверная версия имеет приоритет. Хранятся последние 600 событий, до 220 КБ UTF-8 ленты, 18 memories на NPC; до 200 сессий, неактивные более часа вытесняются. Очистка браузера теряет игру без экспорта. Это не облачная синхронизация; несогласованные вкладки могут восстановить старый snapshot.
+
+[OpenRouter](https://openrouter.ai/docs/api_reference/limits) ограничивает бесплатные вызовы; один ход может потребовать два NPC-запроса и retries JSON. Платные модели автоматически не используются. При закрытом/скрытом приложении симуляция останавливается; background push не подключён. Уведомления касаются настоящих phone-events, пока приложение выполняется.
+
+CSS: `100dvh` fallback, visualViewport, safe-area insets, скролл отдельной ленты, поле ввода 16px без iOS zoom, элементы отправки и настройки не менее 44px в мобильном режиме. Manifest, SVG/PNG-иконки и service worker обеспечивают standalone/offline-оболочку. API не кэшируется. Эмуляция Chromium не подтверждает физический iPhone, Safari-клавиатуру, Add to Home Screen и permissions iOS.
+
+## Проверки и доставка
+
+`npm run check`, `npm test`. Браузерный сценарий `scripts/browser-smoke.cjs` использует отдельно доступный Playwright (не production dependency). Переменные: `PLAYWRIGHT_MODULE`, `PLAYWRIGHT_BROWSERS_PATH`, `BROWSER_ARTIFACT_DIR`, `BASE_URL`. Проверять на локальном сервере без AI-ключа для fallback-сценария.
+
+[Отчёт и список файлов](docs/VERIFICATION.md). PR остаётся draft до проверки реальных ответов OpenRouter и физического iPhone. В исходном репозитории у подключённого аккаунта READ-доступ; только принятие изменений владельцем и deploy Render обновят прежний рабочий домен. Не считать `/api/health ai:true` доказательством успешной генерации.
+
+## Autonomous characters and recovery
+
+After the visible authored opening, `/api/awaken` starts two AI decisions once per session. Each NPC has a private immediate agenda, personality, witnessed knowledge and memory. Player turns prioritize addressed present characters; idle ticks schedule one present and one offscreen character by the fewest completed decisions, so all seven receive turns. Each decision is a separate OpenRouter completion. Movement and speech after the opening are chosen by AI and validated against physical state. No AI dialogue is fabricated when credentials are missing. Simulation runs only while a client is open; background tabs pause it.
+
+`lib/season.js` is a server-only season bible with three acts, motives and causal rules. The director releases evidence gradually and offers three physical resolutions. NPC prompts receive their own immediate agenda, never the season bible. The client receives only witnessed evidence, not future milestones or endings.
+
+Invalid authenticated snapshots are never trusted or converted from unsigned client history. The client offers export and restart; before restarting it stores the raw old cache in `ua_recovery_backup`. Truly empty saves can restart automatically after backup. History with events, a pending turn or a draft requires a restart choice. The previous encrypted world cannot be restored after losing its secret. Keep `SAVE_SECRET` stable; the local `.env` remains ignored by Git. New-story confirmation uses in-page buttons rather than native browser dialogs.
